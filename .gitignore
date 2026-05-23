@@ -1,0 +1,13 @@
+/dist
+/build
+/out
+/node_modules
+/package.json
+/README.md
+/LICENSE
+/CHANGELOG.md
+/CONTRIBUTING.md
+/CODE_OF_CONDUCT.md
+/SECURITY.md
+/PULL_REQUEST_TEMPLATE.md
+/ISSUE_TEMPLATE.md

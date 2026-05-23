@@ -1,0 +1,6 @@
+{
+  "name": "Tính BHXH / Lương hưu / BHTN",
+  "description": "Công cụ hỗ trợ tính toán Bảo hiểm xã hội rút một lần, Lương hưu và Bảo hiểm thất nghiệp cho người lao động.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
