@@ -1,0 +1,58 @@
+# Pings Supabase twice per day so the free-tier project does not pause from inactivity.
+# Add GitHub repo secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+# Run sql/health_ping.sql in Supabase once before relying on the RPC path.
+
+name: Supabase keep-alive
+
+on:
+  schedule:
+    # 08:00 and 20:00 Vietnam (UTC+7) ~= 01:00 and 13:00 UTC
+    - cron: '0 1 * * *'
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping database
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+            echo "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in repository secrets."
+            exit 1
+          fi
+
+          base="${SUPABASE_URL%/}"
+          auth_header="Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}"
+          apikey_header="apikey: ${SUPABASE_SERVICE_ROLE_KEY}"
+
+          ping_rpc() {
+            curl -sS --fail-with-body --max-time 120 \
+              -X POST "${base}/rest/v1/rpc/health_ping" \
+              -H "${apikey_header}" \
+              -H "${auth_header}" \
+              -H "Content-Type: application/json" \
+              -d '{}'
+          }
+
+          ping_profiles_fallback() {
+            curl -sS --fail-with-body --max-time 120 \
+              "${base}/rest/v1/profiles?select=id&limit=1" \
+              -H "${apikey_header}" \
+              -H "${auth_header}"
+          }
+
+          echo "Keep-alive at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if ping_rpc; then
+            echo "RPC health_ping OK"
+            exit 0
+          fi
+
+          echo "RPC failed, trying profiles fallback..."
+          ping_profiles_fallback
+          echo "Fallback OK"

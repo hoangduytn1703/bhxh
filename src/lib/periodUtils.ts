@@ -3,6 +3,105 @@ import type { ContributionPeriod } from '../types';
 export const MONTH_OPTIONS = Array.from({ length: 12 }, (_, i) => i + 1);
 export const YEAR_OPTIONS = Array.from({ length: 61 }, (_, i) => 2050 - i);
 
+/** Sortable key for YYYY-MM (month-level comparison). */
+export function periodMonthKey(year: number, month: number): number {
+  return year * 12 + month;
+}
+
+export function isPeriodRangeValid(period: ContributionPeriod): boolean {
+  return (
+    periodMonthKey(period.endYear, period.endMonth) >=
+    periodMonthKey(period.startYear, period.startMonth)
+  );
+}
+
+/** Ensures end month/year is not before start. */
+export function normalizePeriodRange(period: ContributionPeriod): ContributionPeriod {
+  if (isPeriodRangeValid(period)) return period;
+  return {
+    ...period,
+    endMonth: period.startMonth,
+    endYear: period.startYear,
+  };
+}
+
+/** New period: start = previous end; end >= start. */
+export function createPeriodAfterPrevious(
+  previous: ContributionPeriod | undefined,
+  factory: () => ContributionPeriod
+): ContributionPeriod {
+  const base = factory();
+  if (!previous) return normalizePeriodRange(base);
+
+  const startMonth = previous.endMonth;
+  const startYear = previous.endYear;
+  let { endMonth, endYear, salary, contributionType } = base;
+
+  if (
+    periodMonthKey(endYear, endMonth) <
+    periodMonthKey(startYear, startMonth)
+  ) {
+    endMonth = startMonth;
+    endYear = startYear;
+  }
+
+  if (contributionType !== 'maternity' && previous.contributionType !== 'maternity') {
+    salary = salary || previous.salary;
+  }
+
+  return normalizePeriodRange({
+    ...base,
+    startMonth,
+    startYear,
+    endMonth,
+    endYear,
+    salary,
+  });
+}
+
+/** Start of current period must not be before end of previous period. */
+export function isPeriodStartAfterPrevious(
+  period: ContributionPeriod,
+  previous: ContributionPeriod
+): boolean {
+  return (
+    periodMonthKey(period.startYear, period.startMonth) >=
+    periodMonthKey(previous.endYear, previous.endMonth)
+  );
+}
+
+export function isPeriodSequenceValid(periods: ContributionPeriod[]): boolean {
+  for (let i = 0; i < periods.length; i++) {
+    if (!isPeriodRangeValid(periods[i])) return false;
+    if (i > 0 && !isPeriodStartAfterPrevious(periods[i], periods[i - 1])) return false;
+  }
+  return true;
+}
+
+/** Fix each row (to >= from) and enforce chronological order across rows. */
+export function normalizePeriodSequence(periods: ContributionPeriod[]): ContributionPeriod[] {
+  if (periods.length === 0) return [];
+
+  const result: ContributionPeriod[] = [normalizePeriodRange({ ...periods[0] })];
+
+  for (let i = 1; i < periods.length; i++) {
+    let p = { ...periods[i] };
+    const prev = result[i - 1];
+
+    if (!isPeriodStartAfterPrevious(p, prev)) {
+      p = {
+        ...p,
+        startMonth: prev.endMonth,
+        startYear: prev.endYear,
+      };
+    }
+
+    result.push(normalizePeriodRange(p));
+  }
+
+  return result;
+}
+
 export function formatNumberWithCommas(value: number | string | undefined | null): string {
   if (value === undefined || value === null || value === '') return '';
   const cleaned = typeof value === 'string' ? value.replace(/\D/g, '') : value.toString();
@@ -74,7 +173,7 @@ export function parseContributionPeriodsFromText(text: string): ContributionPeri
     }
   }
 
-  return parsedPeriods;
+  return normalizePeriodSequence(parsedPeriods);
 }
 
 export const emptyMandatoryPeriod = (): ContributionPeriod => ({

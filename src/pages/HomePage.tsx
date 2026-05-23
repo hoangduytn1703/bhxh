@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useForm, useFieldArray } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -12,19 +12,25 @@ import { supabase } from "../lib/supabase";
 
 import { getProfileGender, getProfileBirthYear, mergeProfileDemographics } from "../lib/userProfile";
 import { calculateWorkspaceResults } from "../lib/workspaceCalculations";
+import { isPeriodSequenceValid, normalizePeriodSequence } from "../lib/periodUtils";
 import type { ContributionPeriod } from "../types";
 import { ContributionPeriodsEditor } from "../components/ContributionPeriodsEditor";
 import { ContributionPeriodsImportExport } from "../components/ContributionPeriodsImportExport";
 import { InsuranceModeTabs, type InsuranceTab } from "../components/InsuranceModeTabs";
 
-const periodSchema = z.object({
-  startMonth: z.number().min(1).max(12),
-  startYear: z.number().min(1960).max(2050),
-  endMonth: z.number().min(1).max(12),
-  endYear: z.number().min(1960).max(2050),
-  salary: z.number().min(0, "Lương đóng tối thiểu là 0 VNĐ"),
-  contributionType: z.enum(["mandatory", "voluntary", "maternity"]),
-});
+const periodSchema = z
+  .object({
+    startMonth: z.number().min(1).max(12),
+    startYear: z.number().min(1960).max(2050),
+    endMonth: z.number().min(1).max(12),
+    endYear: z.number().min(1960).max(2050),
+    salary: z.number().min(0, "Lương đóng tối thiểu là 0 VNĐ"),
+    contributionType: z.enum(["mandatory", "voluntary", "maternity"]),
+  })
+  .refine(
+    (p) => p.endYear * 12 + p.endMonth >= p.startYear * 12 + p.startMonth,
+    { message: "Tháng dừng phải ≥ tháng bắt đầu", path: ["endMonth"] }
+  );
 
 const formSchema = z.object({
   gender: z.enum(["male", "female"]),
@@ -33,7 +39,13 @@ const formSchema = z.object({
   quitDate: z.string().or(z.literal("")),
   continueContributionUntilYear: z.number().min(2024).max(2070),
   hasApplied: z.enum(["true", "false"]),
-  periods: z.array(periodSchema).min(1, "Vui lòng thêm ít nhất 1 giai đoạn đóng BHXH"),
+  periods: z
+    .array(periodSchema)
+    .min(1, "Vui lòng thêm ít nhất 1 giai đoạn đóng BHXH")
+    .refine((periods) => isPeriodSequenceValid(periods as ContributionPeriod[]), {
+      message:
+        "Các giai đoạn phải xếp theo thứ tự thời gian (giai đoạn sau không được trước giai đoạn trước)",
+    }),
 });
 
 type FormValues = z.infer<typeof formSchema>;
@@ -77,6 +89,11 @@ export default function HomePage() {
   const [calculatedData, setCalculatedData] = useState<any>(null);
   const [lastCalculatedInputs, setLastCalculatedInputs] = useState<any>(null);
 
+  /** Cloud workspace loaded once per user — avoids TOKEN_REFRESHED overwriting edits. */
+  const workspaceHydratedUserIdRef = useRef<string | null>(null);
+  const cloudLoadGenerationRef = useRef(0);
+  const prevAuthUserIdRef = useRef<string | null>(null);
+
   // Sync activeTab with pathname on load/change
   useEffect(() => {
     const path = location.pathname;
@@ -109,6 +126,19 @@ export default function HomePage() {
     control,
   });
 
+  const applyLocalPeriods = useCallback(
+    (periods: ContributionPeriod[]) => {
+      cloudLoadGenerationRef.current += 1;
+      if (user?.id) {
+        workspaceHydratedUserIdRef.current = user.id;
+      } else {
+        workspaceHydratedUserIdRef.current = "__guest__";
+      }
+      replace(normalizePeriodSequence(periods));
+    },
+    [replace, user?.id]
+  );
+
   const watchedPeriods = watch("periods");
   const gender = watch("gender");
   const birthYear = watch("birthYear");
@@ -122,64 +152,89 @@ export default function HomePage() {
     return new Intl.NumberFormat('en-US').format(amount);
   };
 
-  // Load cloud workspace; giới tính & năm sinh luôn ưu tiên từ hồ sơ khi mở trang
+  // Load cloud workspace once per login (not on every auth token refresh).
   useEffect(() => {
     if (isAuthLoading) return;
 
-    const loadAuto = async () => {
-      if (user) {
-        const { data: { user: freshUser } } = await supabase.auth.getUser();
-        const activeUser = freshUser ?? user;
+    const userId = user?.id ?? null;
+    const wasLoggedIn = prevAuthUserIdRef.current;
+    prevAuthUserIdRef.current = userId;
 
-        try {
-          const { data, error } = await (supabase.from('user_records') as any).select('data').eq('user_id', activeUser.id).single();
-          if (!error && data && data.data) {
-            const remoteData = data.data;
-            const merged = mergeProfileDemographics(activeUser, remoteData);
-            setValue('gender', merged.gender as 'male' | 'female');
-            setValue('birthYear', merged.birthYear);
-            setValue('isWorking', remoteData.isWorking);
-            setValue('quitDate', remoteData.quitDate);
-            setValue('continueContributionUntilYear', remoteData.continueContributionUntilYear);
-            setValue('hasApplied', remoteData.hasApplied);
-            replace(remoteData.periods ?? []);
-            const res = performMath(merged);
-            setCalculatedData(res);
-            setLastCalculatedInputs(merged);
-          } else {
-            const metaGender = getProfileGender(activeUser);
-            const metaBirthYear = getProfileBirthYear(activeUser);
-            if (metaGender) setValue('gender', metaGender);
-            if (metaBirthYear) setValue('birthYear', metaBirthYear);
-            const vals = getValues();
-            const inputs = mergeProfileDemographics(activeUser, {
-              gender: vals.gender,
-              birthYear: vals.birthYear,
-              isWorking: vals.isWorking,
-              quitDate: vals.quitDate,
-              continueContributionUntilYear: vals.continueContributionUntilYear,
-              hasApplied: vals.hasApplied,
-              periods: vals.periods ?? [],
-            });
-            if (metaGender) setValue('gender', inputs.gender as 'male' | 'female');
-            if (metaBirthYear) setValue('birthYear', inputs.birthYear);
-            const res = performMath(inputs);
-            setCalculatedData(res);
-            setLastCalculatedInputs(inputs);
-          }
-        } catch (e) {
-          console.error('loadAuto', e);
-        }
-      } else {
+    if (!userId) {
+      if (wasLoggedIn) {
+        workspaceHydratedUserIdRef.current = null;
         replace([]);
         setCalculatedData(null);
         setLastCalculatedInputs(null);
         localStorage.removeItem('persisted_periods_list');
       }
+      return;
+    }
+
+    if (workspaceHydratedUserIdRef.current === userId) {
+      return;
+    }
+
+    const loadGeneration = ++cloudLoadGenerationRef.current;
+
+    const loadAuto = async () => {
+      const { data: { user: freshUser } } = await supabase.auth.getUser();
+      const activeUser = freshUser ?? user;
+      if (!activeUser || activeUser.id !== userId) return;
+      if (loadGeneration !== cloudLoadGenerationRef.current) return;
+
+      try {
+        const { data, error } = await (supabase.from('user_records') as any)
+          .select('data')
+          .eq('user_id', activeUser.id)
+          .single();
+
+        if (loadGeneration !== cloudLoadGenerationRef.current) return;
+        if (workspaceHydratedUserIdRef.current === userId) return;
+
+        if (!error && data && data.data) {
+          const remoteData = data.data;
+          const merged = mergeProfileDemographics(activeUser, remoteData);
+          setValue('gender', merged.gender as 'male' | 'female');
+          setValue('birthYear', merged.birthYear);
+          setValue('isWorking', remoteData.isWorking);
+          setValue('quitDate', remoteData.quitDate);
+          setValue('continueContributionUntilYear', remoteData.continueContributionUntilYear);
+          setValue('hasApplied', remoteData.hasApplied);
+          replace(normalizePeriodSequence(remoteData.periods ?? []));
+          const res = performMath(merged);
+          setCalculatedData(res);
+          setLastCalculatedInputs(merged);
+        } else {
+          const metaGender = getProfileGender(activeUser);
+          const metaBirthYear = getProfileBirthYear(activeUser);
+          if (metaGender) setValue('gender', metaGender);
+          if (metaBirthYear) setValue('birthYear', metaBirthYear);
+          const vals = getValues();
+          const inputs = mergeProfileDemographics(activeUser, {
+            gender: vals.gender,
+            birthYear: vals.birthYear,
+            isWorking: vals.isWorking,
+            quitDate: vals.quitDate,
+            continueContributionUntilYear: vals.continueContributionUntilYear,
+            hasApplied: vals.hasApplied,
+            periods: vals.periods ?? [],
+          });
+          if (metaGender) setValue('gender', inputs.gender as 'male' | 'female');
+          if (metaBirthYear) setValue('birthYear', inputs.birthYear);
+          const res = performMath(inputs);
+          setCalculatedData(res);
+          setLastCalculatedInputs(inputs);
+        }
+
+        workspaceHydratedUserIdRef.current = userId;
+      } catch (e) {
+        console.error('loadAuto', e);
+      }
     };
 
-    loadAuto();
-  }, [user, isAuthLoading]);
+    void loadAuto();
+  }, [user?.id, isAuthLoading]);
 
   // Live Sync with localStorage and Auto Update quitDate
   useEffect(() => {
@@ -345,8 +400,10 @@ export default function HomePage() {
         setValue('quitDate', remoteData.quitDate);
         setValue('continueContributionUntilYear', remoteData.continueContributionUntilYear);
         setValue('hasApplied', remoteData.hasApplied);
-        replace(remoteData.periods);
-        
+        cloudLoadGenerationRef.current += 1;
+        replace(normalizePeriodSequence(remoteData.periods ?? []));
+        workspaceHydratedUserIdRef.current = user.id;
+
         const res = performMath(remoteData);
         setCalculatedData(res);
         setLastCalculatedInputs(remoteData);
@@ -465,14 +522,14 @@ export default function HomePage() {
 
           <ContributionPeriodsImportExport
             periods={(watchedPeriods || []) as ContributionPeriod[]}
-            onImport={(p) => replace(p)}
+            onImport={(p) => applyLocalPeriods(p)}
             exportFilename="qua-trinh-dong-bhxh-dashboard.txt"
             className="mb-4"
           />
 
           <ContributionPeriodsEditor
             periods={(watchedPeriods || []) as ContributionPeriod[]}
-            onChange={(p) => replace(p)}
+            onChange={(p) => applyLocalPeriods(p)}
             maxHeight="max-h-[400px]"
           />
 
@@ -590,7 +647,7 @@ export default function HomePage() {
                   <div className="p-4 bg-slate-50 border border-slate-100 rounded-2xl text-center sm:text-left">
                     <span className="text-[10px] font-bold text-slate-400 block uppercase tracking-wider mb-0.5">Xu hướng bảo hiểm</span>
                     <strong className={`text-xs font-bold block mt-1 ${bhxhResult.isEligible ? 'text-emerald-600' : 'text-amber-500'}`}>
-                      {bhxhResult.isEligible ? 'Được duyệt ngay' : 'Chờ đủ 1 năm'}
+                      {bhxhResult.statusLabel}
                     </strong>
                   </div>
                 </div>
@@ -603,7 +660,29 @@ export default function HomePage() {
                       {bhxhResult.isEligible ? 'Hồ sơ sẵn sàng nộp cơ quan' : 'CẢNH BÁO: CHƯA ĐỦ ĐIỀU KIỆN NHẬN'}
                     </span>
                   </div>
-                  <p className="text-xs font-semibold leading-relaxed">{bhxhResult.message}</p>
+                  {bhxhResult.isEligible ? (
+                    <p className="text-xs font-semibold leading-relaxed">{bhxhResult.message}</p>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold leading-relaxed">
+                        Chưa đủ điều kiện nhận thực tế vì:
+                      </p>
+                      <ul className="space-y-2 text-xs font-medium leading-relaxed">
+                        {bhxhResult.ineligibilityReasons.map((reason) => (
+                          <li key={reason.id} className="flex gap-2">
+                            <span className="text-red-400 shrink-0">—</span>
+                            <span>
+                              <strong className="font-extrabold">{reason.title}</strong>
+                              <span className="font-normal"> — {reason.detail}</span>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="text-[11px] font-semibold leading-relaxed pt-1 border-t border-red-200/80">
+                        {bhxhResult.message}
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 {/* Explanation of parameters */}

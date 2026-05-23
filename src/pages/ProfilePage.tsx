@@ -11,6 +11,7 @@ import { getDisplayName, getProfileGender, resizeImageToDataUrl, type ProfileGen
 import { syncPublicProfileFromForm } from "../lib/publicProfile";
 import { toast } from "sonner";
 import { loadWorkspace, saveWorkspacePeriods } from "../lib/userRecords";
+import { normalizePeriodSequence } from "../lib/periodUtils";
 import type { ContributionPeriod } from "../types";
 
 export default function ProfilePage() {
@@ -63,13 +64,13 @@ export default function ProfilePage() {
       try {
         const workspace = await loadWorkspace(user.id);
         if (workspace?.periods?.length) {
-          setPeriods(workspace.periods);
+          setPeriods(normalizePeriodSequence(workspace.periods));
         } else {
           const stored = localStorage.getItem('persisted_periods_list');
           if (stored) {
             try {
               const parsed = JSON.parse(stored);
-              if (Array.isArray(parsed)) setPeriods(parsed);
+              if (Array.isArray(parsed)) setPeriods(normalizePeriodSequence(parsed));
             } catch {
               /* ignore */
             }

@@ -6,6 +6,7 @@ import {
   formatVnd,
   type WorkspaceCalculationResult,
 } from '../../lib/workspaceCalculations';
+import { formatBhxhIneligibilityNote } from '../../calculators/bhxhOneTime';
 import { cn } from '../../lib/utils';
 
 type Props = {
@@ -125,11 +126,13 @@ export function MemberBenefitsSummary({ workspace, memberGender }: Props) {
             { label: 'Thời gian đóng', value: `${bhxhResult.totalMonths} tháng (${bhxhResult.totalYears} năm)` },
             {
               label: 'Điều kiện',
-              value: bhxhResult.isEligible ? 'Đủ (ước tính)' : 'Chưa đủ / tham khảo',
+              value: bhxhResult.isEligible
+                ? 'Đủ (ước tính)'
+                : bhxhResult.ineligibilityReasons.map((r) => r.title).join('; ') || 'Chưa đủ',
             },
             { label: 'Tổng tháng hệ thống', value: `${calc.totalMonths} tháng` },
           ]}
-          note={bhxhResult.message}
+          note={formatBhxhIneligibilityNote(bhxhResult)}
           defaultOpen
         />
 
