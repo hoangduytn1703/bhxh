@@ -2,7 +2,6 @@
 /build
 /out
 /node_modules
-/package.json
 /README.md
 /LICENSE
 /CHANGELOG.md
